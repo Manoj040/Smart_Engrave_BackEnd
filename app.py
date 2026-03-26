@@ -24,6 +24,7 @@ bcrypt = Bcrypt(app)
 with app.app_context():
     db.create_all()
 
+
 # ---------------- GLOBAL ERROR HANDLER ----------------
 @app.errorhandler(Exception)
 def handle_any_exception(e):
@@ -36,15 +37,63 @@ def handle_any_exception(e):
 
     print("\n🔥 UNHANDLED ERROR:", repr(e))
     traceback.print_exc()
-    return jsonify({"status": "fail", "message": "Server error", "error": str(e)}), 500
+    return jsonify({
+        "status": "fail",
+        "message": "Server error",
+        "error": str(e)
+    }), 500
 
 
 # ---------------- HELPERS ----------------
 def now_utc():
     return datetime.utcnow()
 
+
 def norm_email(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def validate_email(email: str):
+    email = norm_email(email)
+
+    if not email:
+        return False, "Email is required"
+
+    if "@" not in email:
+        return False, "Enter a valid email address"
+
+    # Strong but practical email validation
+    email_regex = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    if not re.fullmatch(email_regex, email):
+        return False, "Enter a valid email address"
+
+    if ".." in email:
+        return False, "Enter a valid email address"
+
+    return True, ""
+
+
+def validate_password(password: str):
+    if not password:
+        return False, "Password is required"
+
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least 1 uppercase letter"
+
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least 1 lowercase letter"
+
+    if not re.search(r"\d", password):
+        return False, "Password must contain at least 1 digit"
+
+    if not re.search(r"[!@#$%^&*()_\-+=\[\]{};:'\",.<>?/\\|`~]", password):
+        return False, "Password must contain at least 1 special character"
+
+    return True, ""
+
 
 def send_otp_email(to_email: str, otp: str):
     sender = app.config.get("SMTP_EMAIL")
@@ -79,18 +128,24 @@ def home():
 def signup():
     data = request.get_json(silent=True) or {}
 
-    # ✅ support both keys: full_name OR name
     full_name = (data.get("full_name") or data.get("name") or "").strip()
     email = norm_email(data.get("email"))
     password = (data.get("password") or "").strip()
     confirm_password = (data.get("confirm_password") or "").strip()
 
-    if not full_name or not email or not password or not confirm_password:
-        return jsonify({"status": "fail", "message": "Missing fields"}), 400
+    if not full_name:
+        return jsonify({"status": "fail", "message": "Full name is required"}), 400
 
-    email_regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-    if not re.match(email_regex, email):
-        return jsonify({"status": "fail", "message": "Invalid email format"}), 400
+    email_ok, email_msg = validate_email(email)
+    if not email_ok:
+        return jsonify({"status": "fail", "message": email_msg}), 400
+
+    if not password or not confirm_password:
+        return jsonify({"status": "fail", "message": "Password and confirm password are required"}), 400
+
+    password_ok, password_msg = validate_password(password)
+    if not password_ok:
+        return jsonify({"status": "fail", "message": password_msg}), 400
 
     if password != confirm_password:
         return jsonify({"status": "fail", "message": "Passwords do not match"}), 400
@@ -108,7 +163,11 @@ def signup():
     return jsonify({
         "status": "success",
         "message": "Account created",
-        "user": {"id": user.id, "full_name": user.full_name, "email": user.email}
+        "user": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "email": user.email
+        }
     }), 201
 
 
@@ -120,8 +179,12 @@ def login():
     email = norm_email(data.get("email"))
     password = (data.get("password") or "").strip()
 
-    if not email or not password:
-        return jsonify({"status": "fail", "message": "Missing email or password"}), 400
+    email_ok, email_msg = validate_email(email)
+    if not email_ok:
+        return jsonify({"status": "fail", "message": email_msg}), 400
+
+    if not password:
+        return jsonify({"status": "fail", "message": "Password is required"}), 400
 
     user = User.query.filter_by(email=email).first()
     if not user:
@@ -133,7 +196,11 @@ def login():
     return jsonify({
         "status": "success",
         "message": "Login successful",
-        "user": {"id": user.id, "full_name": user.full_name, "email": user.email}
+        "user": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "email": user.email
+        }
     }), 200
 
 
@@ -150,18 +217,18 @@ def forgot_password():
     data = request.get_json(silent=True) or {}
     email = norm_email(data.get("email"))
 
-    if not email:
-        return jsonify({"status": "fail", "message": "Email required"}), 400
+    email_ok, email_msg = validate_email(email)
+    if not email_ok:
+        return jsonify({"status": "fail", "message": email_msg}), 400
 
     user = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({"status": "fail", "message": "Email not registered"}), 404
 
-    otp = str(random.randint(100000, 999999))  # ✅ 6-digit OTP
+    otp = str(random.randint(100000, 999999))
     otp_hash = bcrypt.generate_password_hash(otp).decode("utf-8")
     expires_at = now_utc() + timedelta(minutes=5)
 
-    # ✅ Invalidate old active OTPs for this email
     PasswordReset.query.filter_by(email=email, is_used=False).update({"is_used": True})
     db.session.commit()
 
@@ -175,7 +242,6 @@ def forgot_password():
     db.session.add(pr)
     db.session.commit()
 
-    # Send email
     send_otp_email(email, otp)
 
     return jsonify({"status": "success", "message": "OTP sent to email"}), 200
@@ -186,15 +252,24 @@ def forgot_password():
 def verify_otp():
     data = request.get_json(silent=True) or {}
     email = norm_email(data.get("email"))
-    otp = (str(data.get("otp") or "")).strip()
+    otp = str(data.get("otp") or "").strip()
 
-    if not email or not otp:
-        return jsonify({"status": "fail", "message": "Email and OTP required"}), 400
+    email_ok, email_msg = validate_email(email)
+    if not email_ok:
+        return jsonify({"status": "fail", "message": email_msg}), 400
 
-    pr = (PasswordReset.query
-          .filter_by(email=email, is_used=False)
-          .order_by(PasswordReset.id.desc())
-          .first())
+    if not otp:
+        return jsonify({"status": "fail", "message": "OTP is required"}), 400
+
+    if not re.fullmatch(r"\d{6}", otp):
+        return jsonify({"status": "fail", "message": "OTP must be 6 digits"}), 400
+
+    pr = (
+        PasswordReset.query
+        .filter_by(email=email, is_used=False)
+        .order_by(PasswordReset.id.desc())
+        .first()
+    )
 
     if not pr:
         return jsonify({"status": "fail", "message": "No active OTP request found"}), 404
@@ -236,16 +311,25 @@ def reset_password():
     new_password = (data.get("new_password") or "").strip()
     confirm_password = (data.get("confirm_password") or "").strip()
 
-    if not reset_token or not new_password or not confirm_password:
-        return jsonify({"status": "fail", "message": "Missing fields"}), 400
+    if not reset_token:
+        return jsonify({"status": "fail", "message": "Reset token is required"}), 400
+
+    if not new_password or not confirm_password:
+        return jsonify({"status": "fail", "message": "New password and confirm password are required"}), 400
+
+    password_ok, password_msg = validate_password(new_password)
+    if not password_ok:
+        return jsonify({"status": "fail", "message": password_msg}), 400
 
     if new_password != confirm_password:
         return jsonify({"status": "fail", "message": "Passwords do not match"}), 400
 
-    pr = (PasswordReset.query
-          .filter_by(reset_token=reset_token)
-          .order_by(PasswordReset.id.desc())
-          .first())
+    pr = (
+        PasswordReset.query
+        .filter_by(reset_token=reset_token)
+        .order_by(PasswordReset.id.desc())
+        .first()
+    )
 
     if not pr or pr.is_used:
         return jsonify({"status": "fail", "message": "Invalid reset request"}), 400
